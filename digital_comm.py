@@ -3,11 +3,16 @@ Simulação educativa de um sistema de transmissão digital.
 
 Fluxo principal:
 - Converte texto ASCII em bits.
-- Codifica em Manchester.
+- Codifica em Manchester ou Bifase-Mark (Differential Manchester).
 - Modula (BPSK ou QPSK).
 - Canal AWGN.
 - Demodula e decodifica o sinal.
 - Recupera texto e calcula a BER.
+
+Codificadores de Canal Implementados:
+- Manchester: bit 0 -> [low, high], bit 1 -> [high, low]
+- BiphaseMark: Codificação diferencial com transição mid-bit sempre presente.
+  bit 1 gera transição no início, bit 0 não gera transição no início.
 
 Somente numpy e matplotlib são utilizados para manter o foco na matemática do
 sinal e evitar bibliotecas "caixa preta".
@@ -60,6 +65,72 @@ class ManchesterEncoder:
             1,
         )
         return decoded.astype(np.int8)
+
+
+class BiphaseMarkEncoder:
+    """
+    Codificação e decodificação Bifase-Mark (Differential Manchester).
+    
+    Características:
+    - Sempre há transição no meio do intervalo do bit (mid-bit).
+    - bit = 1: há transição no início do intervalo.
+    - bit = 0: não há transição no início do intervalo.
+    - Codificação diferencial que depende do nível anterior.
+    """
+
+    def __init__(self, low_high: tuple[int, int] = (0, 1), start_level: int = 1) -> None:
+        self.low, self.high = low_high
+        self.start_level = start_level
+
+    def _toggle(self, level: int) -> int:
+        """Alterna entre low e high."""
+        return self.high if level == self.low else self.low
+
+    def encode(self, bits: np.ndarray) -> np.ndarray:
+        """
+        Codifica bits em Bifase-Mark.
+        Cada bit gera dois níveis (first_half, second_half).
+        """
+        encoded = np.empty(bits.size * 2, dtype=np.int8)
+        prev_level = self.start_level
+        
+        for i, bit in enumerate(bits):
+            # Se bit == 1, faz transição no início
+            if bit == 1:
+                prev_level = self._toggle(prev_level)
+            
+            # Primeiro half do intervalo
+            first_half = prev_level
+            # Transição mid-bit sempre ocorre
+            second_half = self._toggle(first_half)
+            
+            encoded[2*i] = first_half
+            encoded[2*i + 1] = second_half
+            
+            # O nível ao final do bit se torna o estado para o próximo
+            prev_level = second_half
+        
+        return encoded
+
+    def decode(self, encoded: np.ndarray) -> np.ndarray:
+        """
+        Decodifica sequência Bifase-Mark de volta para bits.
+        Detecta transições no início de cada intervalo de bit.
+        """
+        if encoded.size % 2 != 0:
+            raise ValueError("Sequência Bifase-Mark deve ter tamanho par.")
+        
+        pairs = encoded.reshape(-1, 2)
+        decoded = np.empty(pairs.shape[0], dtype=np.int8)
+        prev_level = self.start_level
+        
+        for i, (first, second) in enumerate(pairs):
+            # bit = 1 se houve transição no início (first != prev_level)
+            decoded[i] = 1 if first != prev_level else 0
+            # Atualiza o nível anterior para o fim deste bit
+            prev_level = second
+        
+        return decoded
 
 
 class BPSKModem:
@@ -124,14 +195,33 @@ class AWGNChannel:
 
 
 class DigitalTransmissionSimulator:
-    """Simulador completo com codificação Manchester, modulação e BER."""
+    """Simulador completo com codificação de canal, modulação e BER."""
 
-    def __init__(self, text: str, ebn0_range: list[int] | np.ndarray, seed: int = 0) -> None:
+    def __init__(
+        self, 
+        text: str, 
+        ebn0_range: list[int] | np.ndarray, 
+        encoder_name: str = "Manchester",
+        seed: int = 0
+    ) -> None:
         self.text = text
         self.ebn0_range = np.array(ebn0_range)
         self.rng = np.random.default_rng(seed)
         self.converter = BitStreamConverter()
-        self.encoder = ManchesterEncoder()
+        
+        # Seleção do codificador de canal
+        encoders = {
+            "Manchester": ManchesterEncoder(),
+            "BiphaseMark": BiphaseMarkEncoder(),
+        }
+        if encoder_name not in encoders:
+            raise ValueError(
+                f"Codificador '{encoder_name}' desconhecido. "
+                f"Opções: {list(encoders.keys())}"
+            )
+        self.encoder = encoders[encoder_name]
+        self.encoder_name = encoder_name
+        
         self.channel = AWGNChannel()
         self.modems = {
             "BPSK": BPSKModem(),
@@ -175,7 +265,7 @@ class DigitalTransmissionSimulator:
         plt.grid(True, which="both", linestyle="--", alpha=0.6)
         plt.xlabel("Eb/N0 (dB)")
         plt.ylabel("BER")
-        plt.title("BER x Eb/N0 para BPSK e QPSK com codificação Manchester")
+        plt.title(f"BER x Eb/N0 para BPSK e QPSK com codificação {self.encoder_name}")
         plt.legend()
         plt.tight_layout()
         plt.savefig(output_file, dpi=150)
@@ -187,35 +277,53 @@ if __name__ == "__main__":
         "Engenharia de Telecomunicacoes exige clareza, precisao e muita pratica para"
         " dominar os fundamentos de sistemas digitais. "
         "Esta simulacao em Python demonstra o impacto do ruido sobre diferentes"
-        " modulacoes com codificacao Manchester."
+        " modulacoes com codificacao de canal."
     )
     
-    # 1. Range estendido para capturar o comportamento em alto ruído (-10 dB)
+    # Range estendido para capturar o comportamento em alto ruído (-10 dB)
     ebn0_values = np.arange(-10, 16, 2)
     
-    simulator = DigitalTransmissionSimulator(long_text, ebn0_values, seed=42)
-    ber = simulator.run()
-    simulator.plot(ber)
-
-    # 2. Cálculo da Eficiência Espectral
-    manchester_rate = 0.5 
-    efficiencies = {
-        "BPSK": 1 * manchester_rate,
-        "QPSK": 2 * manchester_rate,
-    }
-    print("\nEficiência espectral teórica (bits/s/Hz) com Manchester:")
-    for name, eff in efficiencies.items():
-        print(f" - {name}: {eff:.2f} bits/s/Hz")
-
-    # 3. Demonstração Prática (Texto Completo)
-    # Mostramos 0 dB (ruído forte) e 10 dB (ruído fraco/nulo na prática)
-    demonstration_snrs = [0, 10] 
+    # Simulação com ambos os codificadores
+    encoders_to_test = ["Manchester", "BiphaseMark"]
     
-    for snr in demonstration_snrs:
-        print(f"\n{'='*20} Demonstração com Eb/N0 = {snr} dB {'='*20}")
-        for modem_name in simulator.modems:
-            errors, total, recovered = simulator._transmit_once(modem_name, snr)
-            ber = errors / total
-            print(f"\n[{modem_name}] BER: {ber:.6f} (Erros: {errors}/{total})")
-            print(f"Texto Recuperado:\n{recovered}") # <--- CORREÇÃO: Removido o limite [:100]
-            print("-" * 60)
+    for encoder_name in encoders_to_test:
+        print(f"\n{'='*60}")
+        print(f"SIMULAÇÃO COM CODIFICADOR: {encoder_name}")
+        print(f"{'='*60}\n")
+        
+        simulator = DigitalTransmissionSimulator(
+            long_text, 
+            ebn0_values, 
+            encoder_name=encoder_name,
+            seed=42
+        )
+        ber = simulator.run()
+        
+        # Salva gráfico específico para cada codificador
+        output_file = f"ber_vs_ebn0_{encoder_name.lower()}.png"
+        simulator.plot(ber, output_file=output_file)
+        
+        # Cálculo da Eficiência Espectral (mesma para ambos)
+        coding_rate = 0.5  # Ambos dobram a taxa de símbolos
+        efficiencies = {
+            "BPSK": 1 * coding_rate,
+            "QPSK": 2 * coding_rate,
+        }
+        print(f"\nEficiência espectral teórica (bits/s/Hz) com {encoder_name}:")
+        for name, eff in efficiencies.items():
+            print(f" - {name}: {eff:.2f} bits/s/Hz")
+        
+        # Demonstração Prática em dois níveis de SNR
+        demonstration_snrs = [0, 10]  # 0 dB (ruído moderado) e 10 dB (ruído baixo)
+        
+        for snr in demonstration_snrs:
+            print(f"\n{'='*60}")
+            print(f"DEMONSTRAÇÃO PRÁTICA - {encoder_name} em Eb/N0 = {snr} dB")
+            print(f"{'='*60}")
+            
+            for modem_name in simulator.modems:
+                errors, total, recovered = simulator._transmit_once(modem_name, snr)
+                ber_demo = errors / total
+                print(f"\n[{modem_name}] BER: {ber_demo:.6f} (Erros: {errors}/{total})")
+                print(f"Texto Recuperado:\n{recovered[:100]}...")
+                print("-" * 60)
